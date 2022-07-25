@@ -12,6 +12,7 @@ import csv
 import time
 import os
 import can
+import smbus
 
 
 CSV_FOLDER = Path("CSV")
@@ -68,6 +69,24 @@ nodes_tested = range(9)
 
 # admin_node_num = -1
 # admin_power_line_num = 0
+
+
+class KeyPad:
+    def __init__(self):
+        self.__bus = smbus.SMBus(1)
+        self.__key_code = 0x00
+        self.__was_pressed = False
+
+    def read_key(self):
+        data = int(self.__bus.read_byte_data(0x24, 0x01))
+        self.__key_code = data & 0x3f
+        key_pressed = data & 0x40 == 0x40
+        key_pressed_now = key_pressed and not self.__was_pressed
+        self.__was_pressed = key_pressed
+        return key_pressed_now
+
+    def get_key_code(self):
+        return self.__key_code
 
 
 class PowerLine:
@@ -1131,6 +1150,8 @@ class NodesCan:
         else:
             time_text = ''
         self.__label_time.configure(text=time_text)
+        if key_pad.read_key():
+            print(hex(key_pad.get_key_code()))
         if poll_active:
             if not self.__blinking_enabled:
                 self.enable_blinking()
@@ -5396,6 +5417,7 @@ root.bind("<Shift-F12>", terminal_header_on_off)
 
 
 frame_num = 0
+key_pad = KeyPad()
 power_lines = PowerLines()
 nodes = Nodes()
 users = Users()
