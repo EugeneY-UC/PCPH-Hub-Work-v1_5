@@ -50,17 +50,17 @@ service_key_counter = 0
 BLINK_ACTIVE = 750                      # 1_350
 BLINK_PAUSE = 150                       # 350
 
-time_label_active = True
+time_label_active = False
 hundreds_label_active = False
-show_node_status_admin_mode = False
+show_node_status_in_admin_mode = False
 show_all_nodes_in_admin_mode = False
 poll_active = True
-can1_configured = True
+can1_configured = False
 force_charging_enabled = False
 node_reset_when_cable_detached = False
 node_reset_when_can_reconnected = False
-terminal_output = True
-terminal_header = True
+terminal_output = False
+terminal_header = False
 
 cur_user = None
 node_num = -1
@@ -77,6 +77,22 @@ class KeyPad:
         self.__key_code = 0x00
         self.__was_pressed = False
 
+        self.__key_codes = {
+            0x0F: '0',
+            0x04: '1',
+            0x0C: '2',
+            0x14: '3',
+            0x05: '4',
+            0x0D: '5',
+            0x15: '6',
+            0x06: '7',
+            0x0E: '8',
+            0x16: '9',
+            0x17: 'Enter',
+            0x07: 'Cancel',
+            0x2E: 'Start'
+        }
+
     def read_key(self):
         data = int(self.__bus.read_byte_data(0x24, 0x01))
         self.__key_code = data & 0x3f
@@ -87,6 +103,12 @@ class KeyPad:
 
     def get_key_code(self):
         return self.__key_code
+
+    def get_key_name(self):
+        key_name = self.__key_codes.get(self.__key_code)
+        if key_name is None:
+            key_name = "Unknown"
+        return key_name
 
 
 class PowerLine:
@@ -811,6 +833,28 @@ class NodesCan:
         label_4_2.configure(text=self.__message_1_displayed)
         label_4_3.configure(text=self.__message_2_displayed)
 
+    def print_key_to_terminal(self):
+        key_code = key_pad.get_key_code()
+        key_name = key_pad.get_key_name()
+        if terminal_header:
+            print('\n|||', '-' * 109, '|||')
+            print('|||', '-' * 109, '|||')
+            print('|||---------------------------------', end='')
+            print("   KeyPad Key Pressed Event   ", end=' ')
+            print('-', self.__time_stamp.strftime("%H:%M:%S.%f")[:-4], end=' ')
+            print('---------------------------------|||')
+            print('|||', '-' * 109, '|||')
+            print('|||', '-' * 109, '|||')
+            print('|||', ' ' * 109, '|||')
+            print('|||', f"   Key Pressed = {key_name:8s}   ( Hex Code = Ox{key_code:02x} )",
+                  ' ' * 61, '|||')
+            print('|||', ' ' * 109, '|||')
+            print('|||', '-' * 109, '|||')
+            print('|||', '-' * 109, '|||\n')
+        else:
+            print("KeyPad Event ->   Key Pressed = ", key_name,
+                  "   ( Key Hex Code = ", hex(key_code), ')'),
+
     def print_terminal_header(self):
         print('\n\n\n========================================', end=' ')
         if self.__restart_state:
@@ -877,7 +921,7 @@ class NodesCan:
                     error_msg = msg.data[1]
                 if len(msg.data) > 7:
                     amp_value = (msg.data[5] * 0x100 + msg.data[4]) / 100
-                if show_node_status_admin_mode:
+                if show_node_status_in_admin_mode:
                     self.__message_1_to_display = DISPLAY_STATUS_1[message_state]
                     if message_state == 0:            # self-testing
                         self.__message_1_font = font_4
@@ -1151,7 +1195,7 @@ class NodesCan:
             time_text = ''
         self.__label_time.configure(text=time_text)
         if key_pad.read_key():
-            print(hex(key_pad.get_key_code()))
+            self.print_key_to_terminal()
         if poll_active:
             if not self.__blinking_enabled:
                 self.enable_blinking()
@@ -1973,12 +2017,12 @@ def hundreds_label_on_off(event):
 
 # noinspection PyUnusedLocal
 def show_node_user_or_admin(event):
-    global show_node_status_admin_mode
-    if show_node_status_admin_mode:
-        show_node_status_admin_mode = False
+    global show_node_status_in_admin_mode
+    if show_node_status_in_admin_mode:
+        show_node_status_in_admin_mode = False
         show_service_key_message("USER Mode")
     else:
-        show_node_status_admin_mode = True
+        show_node_status_in_admin_mode = True
         show_service_key_message("ADMIN Mode")
 
 
