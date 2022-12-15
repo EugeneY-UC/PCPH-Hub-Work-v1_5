@@ -6,11 +6,11 @@ from tkinter import ttk
 from tkinter import font as tk_font
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
-import csv
-import time
 import os
+import time
+import csv
 import can
 import smbus
 
@@ -25,6 +25,8 @@ node_statuses = "ONLINE", "OFFLINE", "REPAIR"
 
 DISPLAY_STATUS_1 = "SELF-TESTING", "STANDBY", "CAR CONNECTED", "CHARGING",\
                    "CHARGING COMPLETE", "NODE DISABLED", "ERROR", "INVALID VALUE"
+DISPLAY_STATUS_1_V2 = "POWER UP", "SELF-TESTING", "STANDBY", "CAR CONNECTED",\
+                      "CHARGING", "CHARGING COMPLETE", "NODE DISABLED", "ERROR"
 DISPLAY_STATUS_2 = "Charging Disabled", "Charging Enabled", "Invalid Value"
 
 CAN_BANKS_MAX = 1
@@ -36,39 +38,55 @@ START_PIN = "0000"
 PASSWORD_TEXT_LENGTH = 6
 START_PASS = "000000"
 
-POLL_TIME = 10
-RESPONSE_MAX_TIME = 0.02                # 5
+POLL_TIME = 12
+RESPONSE_MAX_TIME = 0.02                        # 5
 
-SCREEN_SAVER_TIME = 3_000_000           # 12_0000             # 15_000
+SCREEN_SAVER_TIME = 3_000_000                   # 12_0000             # 15_000
 screen_save_event_counter = 0
-WAIT_CONNECTION_TIME = 300_000          # 15_000
+WAIT_CONNECTION_TIME = 300_000                  # 15_000
 wait_connection_counter = 0
 wait_connection_node = -1
 wait_connection_queue = list()
 SERVICE_KEY_MESSAGE_TIME = 5_000
 service_key_counter = 0
-BLINK_ACTIVE = 750                      # 1_350
-BLINK_PAUSE = 150                       # 350
+BLINK_ACTIVE = 750                              # 1_350
+BLINK_PAUSE = 150                               # 350
 
-time_label_active = False
-hundreds_label_active = False
-show_node_status_in_admin_mode = False
-show_all_nodes_in_admin_mode = False
-poll_active = True
-can1_configured = False
-force_charging_enabled = False
-node_reset_when_cable_detached = False
-node_reset_when_can_reconnected = False
-terminal_output = False
-terminal_header = False
+show_all_nodes_in_admin_mode = False            # Shift-F2
+show_node_status_in_admin_mode = False          # Shift-F3
+time_label_active = True                        # Shift-F5
+hundreds_label_active = False                   # Shift-F6
+
+terminal_output = True                          # Alt-F5
+terminal_header = True                          # Alt-F6
+
+poll_active = True                              # Alt-Shift-C
+# can1_configured = True
+
+node_reset_when_can_reconnected = True          # Control-F5
+node_reset_when_node_get_disabled = True        # Control-F6
+node_reset_when_user_unplug_cable = False       # Control-F12
+
+force_charging_enabled = False                  # Ctrl-Shift-C
 
 cur_user = None
 node_num = -1
 
-nodes_tested = range(9)
-
 # admin_node_num = -1
 # admin_power_line_num = 0
+
+nodes_supported = range(9)
+nodes_debugged = 0, 5, 6, 7
+NODE_DISPLAYED_IN_DEBUG = 0
+
+
+def get_debug_mode():
+    # mode = input("Debug mode (y/Y) - ? ")
+    # return mode == 'y' or mode == 'Y'
+    return False
+
+
+num_pad_num_pressed = ''
 
 
 class KeyPad:
@@ -107,8 +125,42 @@ class KeyPad:
     def get_key_name(self):
         key_name = self.__key_codes.get(self.__key_code)
         if key_name is None:
-            key_name = "Unknown"
+            key_name = ''
         return key_name
+
+    def get_key_num(self):
+        key_num = self.__key_codes.get(self.__key_code)
+        if key_num is None or key_num == 'Enter' or key_num == 'Cancel':
+            key_num = ''
+        return key_num
+
+    def generate_events(self):
+        global num_pad_num_pressed
+        num_pad_num_pressed = self.get_key_num()
+        if frame_num == 0:
+            frame_0.event_generate('<<KpAnyKey>>', when='tail')
+        if frame_num == 1:
+            if self.__key_code == 0x07:
+                entry_1.event_generate('<<KpCancel>>', when='tail')
+            if self.__key_code == 0x17:
+                entry_1.event_generate('<<KpEnter>>', when='tail')
+            if num_pad_num_pressed != '':
+                entry_1.event_generate('<<KpNum>>', when='tail')
+        if frame_num == 2:
+            if self.__key_code == 0x07:
+                entry_2.event_generate('<<KpCancel>>', when='tail')
+            if self.__key_code == 0x17:
+                entry_2.event_generate('<<KpEnter>>', when='tail')
+            if num_pad_num_pressed != '':
+                entry_2.event_generate('<<KpNum>>', when='tail')
+        if frame_num == 3:
+            if self.__key_code == 0x07:
+                frame_3.event_generate('<<KpCancel>>', when='tail')
+            if self.__key_code == 0x17:
+                frame_3.event_generate('<<KpEnter>>', when='tail')
+        if frame_num == 4:
+            if self.__key_code == 0x07:
+                frame_4.event_generate('<<KpCancel>>', when='tail')
 
 
 class PowerLine:
@@ -517,6 +569,7 @@ class NodeCan:
     def __init__(self, node_static):
         self.__node = node_static
         self.__node_to_reset = False
+        self.__reset_cycles_count = 0
         self.__node_connected = True
         self.__state = 0
         self.__state_response = 0x00
@@ -542,10 +595,18 @@ class NodeCan:
         return self.__node_to_reset
 
     def set_flag_node_to_reset(self):
+        self.__reset_cycles_count = 0
         self.__node_to_reset = True
 
     def clear_flag_node_to_reset(self):
+        self.__reset_cycles_count = 0
         self.__node_to_reset = False
+
+    def get_reset_cycles_count(self):
+        return self.__reset_cycles_count
+
+    def increment_reset_cycles_count(self):
+        self.__reset_cycles_count += 1
 
     def get_node_connected(self):
         return self.__node_connected
@@ -648,7 +709,8 @@ class NodesCan:
         self.__restart_state = True
         self.__restart_mode = -1
         self.__restart_cycles_count = 0
-        self.__restart_cycles_max = 16
+        self.__restart_cycles_max = 18
+        self.__flag_reset_per_cycle_active = True
 
         self.__node_num_user_selected = -1
 
@@ -667,23 +729,23 @@ class NodesCan:
         self.__blink_active = True
         self.__blink_time_stamp = time.time()
 
-        # noinspection SpellCheckingInspection
-        os.system('sudo ip link set can0 type can bitrate 125000')
-        # noinspection SpellCheckingInspection
-        os.system('sudo ifconfig can0 txqueuelen 65536')
-        os.system('sudo ifconfig can0 up')
+        if os.name == 'posix':
+            # noinspection SpellCheckingInspection
+            os.system('sudo ip link set can0 type can bitrate 125000')
+            os.system('sudo ifconfig can0 txqueuelen 65536')
+            os.system('sudo ifconfig can0 up')
         # noinspection SpellCheckingInspection
         self.__can0 = can.interface.Bus(channel='can0',
-                                        bustype='socketcan_ctypes')
+                                        bustype='socketcan')
 
-        # noinspection SpellCheckingInspection
-        os.system('sudo ip link set can1 type can bitrate 125000')
-        # noinspection SpellCheckingInspection
-        os.system('sudo ifconfig can1 txqueuelen 65536')
-        os.system('sudo ifconfig can1 up')
+        if os.name == 'posix':
+            # noinspection SpellCheckingInspection
+            os.system('sudo ip link set can1 type can bitrate 125000')
+            os.system('sudo ifconfig can1 txqueuelen 65536')
+            os.system('sudo ifconfig can1 up')
         # noinspection SpellCheckingInspection
         self.__can1 = can.interface.Bus(channel='can1',
-                                        bustype='socketcan_ctypes')
+                                        bustype='socketcan')
 
         self.__label_time = tk.Label(frame_4,
                                      text='',
@@ -696,8 +758,9 @@ class NodesCan:
         self.main_cycle()
 
     def __del__(self):
-        os.system('sudo ifconfig can1 down')
-        os.system('sudo ifconfig can0 down')
+        if os.name == 'posix':
+            os.system('sudo ifconfig can1 down')
+            os.system('sudo ifconfig can0 down')
 
     def get_nodes_active(self):
         return self.__nodes
@@ -747,81 +810,80 @@ class NodesCan:
             node = self.get_active_node_by_can_number(node_number)
             if node is not None:
                 node_state = node.get_state_response()
-                car_connected = node_state == 0x02 or node_state == 0x03 or node_state == 0x04
+                car_connected = node_state == 0x03 or node_state == 0x04 or node_state == 0x05
                 if not car_connected:
                     self.disable_charging_node_number(node_number)
 
     def msg_get_state_polling(self):
         return can.Message(arbitration_id=0x400 | self.__node_count << 4,
                            data=[0x00],
-                           extended_id=False)
+                           is_extended_id=False)
 
     def msg_self_test(self):
         return can.Message(arbitration_id=0x401 | self.__node_count << 4,
                            data=[0x01],
-                           extended_id=False)
+                           is_extended_id=False)
 
     def msg_set_standby(self):
         return can.Message(arbitration_id=0x402 | self.__node_count << 4,
-                           data=[0x02,
-                                 0x02,
-                                 0x02],
-                           extended_id=False)
+                           data=[0x02],
+                           is_extended_id=False)
 
     def msg_enable_charging(self):
         return can.Message(arbitration_id=0x403 | self.__node_count << 4,
                            data=[0x03],
-                           extended_id=False)
+                           is_extended_id=False)
 
     def msg_disable_charging(self):
         return can.Message(arbitration_id=0x404 | self.__node_count << 4,
                            data=[0x04],
-                           extended_id=False)
+                           is_extended_id=False)
 
-    def msg_set_current(self, set_current=0x02):
+    def msg_set_current(self, set_current=0x08):
         return can.Message(arbitration_id=0x405 | self.__node_count << 4,
                            data=[0x05,
-                                 0x00,
                                  set_current],
-                           extended_id=False)
+                           is_extended_id=False)
 
     def msg_disable_node(self):
         return can.Message(arbitration_id=0x407 | self.__node_count << 4,
                            data=[0x07],
-                           extended_id=False)
+                           is_extended_id=False)
 
     def enable_charging_node_number(self, node_number):
         message = can.Message(arbitration_id=0x403 | node_number << 4,
                               data=[0x03],
-                              extended_id=False)
+                              is_extended_id=False)
         self.poll_node(message)
 
     def disable_charging_node_number(self, node_number):
         message = can.Message(arbitration_id=0x404 | node_number << 4,
                               data=[0x04],
-                              extended_id=False)
+                              is_extended_id=False)
         self.poll_node(message)
 
     def hard_reset_node_number(self, node_number):
         time.sleep(0.25)
         message = can.Message(arbitration_id=0x407 | node_number << 4,
                               data=[0x07],
-                              extended_id=False)
+                              is_extended_id=False)
         self.poll_node(message)
         time.sleep(0.5)
         message = can.Message(arbitration_id=0x402 | self.__node_count << 4,
-                              data=[0x02,
-                                    0x02,
-                                    0x02],
-                              extended_id=False)
+                              data=[0x02],
+                              is_extended_id=False)
         self.poll_node(message)
-        time.sleep(0.5)
-        message = can.Message(arbitration_id=0x402 | self.__node_count << 4,
-                              data=[0x02,
-                                    0x02,
-                                    0x02],
-                              extended_id=False)
-        self.poll_node(message)
+
+    def hard_reset_current_node(self):
+        counter = self.__current_node_active.get_reset_cycles_count()
+        if counter == 1:
+            self.poll_node(self.msg_disable_node())
+        if counter == 2:
+            self.poll_node(self.msg_self_test())
+        if counter == 5:
+            self.poll_node(self.msg_set_standby())
+            self.__current_node_active.clear_flag_node_to_reset()
+        self.__current_node_active.increment_reset_cycles_count()
 
     def enable_blinking(self):
         self.__blinking_enabled = True
@@ -833,36 +895,41 @@ class NodesCan:
         label_4_2.configure(text=self.__message_1_displayed)
         label_4_3.configure(text=self.__message_2_displayed)
 
-    def print_key_to_terminal(self):
+    def print_key_info_to_terminal(self):
         key_code = key_pad.get_key_code()
         key_name = key_pad.get_key_name()
+        key_name_quoted = '\'' + key_name + '\''
         if terminal_header:
+            print()
+            print()
+            print()
             print('\n|||', '-' * 109, '|||')
-            print('|||', '-' * 109, '|||')
+            # print('|||', '-' * 109, '|||')
             print('|||---------------------------------', end='')
             print("   KeyPad Key Pressed Event   ", end=' ')
             print('-', self.__time_stamp.strftime("%H:%M:%S.%f")[:-4], end=' ')
             print('---------------------------------|||')
-            print('|||', '-' * 109, '|||')
-            print('|||', '-' * 109, '|||')
+            # print('|||', '-' * 109, '|||')
+            # print('|||', '-' * 109, '|||')
             print('|||', ' ' * 109, '|||')
-            print('|||', f"   Key Pressed = {key_name:8s}   ( Hex Code = Ox{key_code:02x} )",
-                  ' ' * 61, '|||')
-            print('|||', ' ' * 109, '|||')
-            print('|||', '-' * 109, '|||')
+            print('|||',
+                  f"   Key Pressed = {key_name_quoted:10s}   ( Hex Code = Ox{key_code:02x} )",
+                  ' ' * 59, '|||')
+            # print('|||', ' ' * 109, '|||')
+            # print('|||', '-' * 109, '|||')
             print('|||', '-' * 109, '|||\n')
         else:
-            print("KeyPad Event ->   Key Pressed = ", key_name,
+            print("KeyPad Event ->   Key Pressed = ", key_name_quoted,
                   "   ( Key Hex Code = ", hex(key_code), ')'),
 
     def print_terminal_header(self):
-        print('\n\n\n========================================', end=' ')
+        print('\n\n\n==================================', end=' ')
         if self.__restart_state:
             print(f"CAN Init Cycle # {self.__restart_cycles_count:03}", end=' ')
         else:
             print("  CAN Working Cycle  ", end='')
-        print('-', self.__time_stamp.strftime("%H:%M:%S.%f")[:-4], end=' ')
-        print('=========================================\n')
+        print('-', self.__time_stamp.strftime("%Y-%m-%d %H:%M:%S.%f")[:-4], end=' ')
+        print('====================================\n')
 
     def poll_node(self, msg_out):
         if self.__node_bank_count == 0:
@@ -884,7 +951,7 @@ class NodesCan:
 
         # if node_to_display not in nodes_tested and node_to_display == node_num:
 
-        if node_to_display not in nodes_tested:
+        if node_to_display not in nodes_supported:
             self.__message_1_to_display = "DISABLED"
             self.__message_1_font = font_5
             self.__message_1_color = color_message_red
@@ -908,7 +975,7 @@ class NodesCan:
                 self.__message_2_color = color_message_white
                 self.__message_2_blinking = False
             else:
-                message_state = len(DISPLAY_STATUS_1) - 1
+                message_state = len(DISPLAY_STATUS_1_V2) - 1
                 message_sub_state = len(DISPLAY_STATUS_2) - 1
                 error_msg = 0
                 amp_value = 0.0
@@ -919,44 +986,48 @@ class NodesCan:
                     if msg.data[1] < message_sub_state:
                         message_sub_state = msg.data[1]
                     error_msg = msg.data[1]
-                if len(msg.data) > 7:
+                if len(msg.data) > 5:
                     amp_value = (msg.data[5] * 0x100 + msg.data[4]) / 100
                 if show_node_status_in_admin_mode:
-                    self.__message_1_to_display = DISPLAY_STATUS_1[message_state]
-                    if message_state == 0:            # self-testing
+                    self.__message_1_to_display = DISPLAY_STATUS_1_V2[message_state]
+                    if message_state == 0:            # power-up
                         self.__message_1_font = font_4
                         self.__message_1_color = color_message_white
                         self.__message_1_blinking = False
-                    if message_state == 1:            # standby
+                    if message_state == 1:            # self-testing
+                        self.__message_1_font = font_5
+                        self.__message_1_color = color_message_white
+                        self.__message_1_blinking = False
+                    if message_state == 2:            # standby
                         self.__message_1_font = font_5
                         self.__message_1_color = color_message_blue
                         self.__message_1_blinking = False
-                    if message_state == 2:            # car connected
+                    if message_state == 3:            # car connected
                         self.__message_1_font = font_5
                         self.__message_1_color = color_message_blue
                         self.__message_1_blinking = False       # True
-                    if message_state == 3:            # charging
+                    if message_state == 4:            # charging
                         self.__message_1_font = font_5
                         self.__message_1_color = color_message_green
                         self.__message_1_blinking = False       # True
-                    if message_state == 4:            # charging complete
+                    if message_state == 5:            # charging complete
                         self.__message_1_font = font_5a
                         self.__message_1_color = color_message_green
                         self.__message_1_blinking = False
-                    if message_state == 5:            # node disabled
+                    if message_state == 6:            # node disabled
                         self.__message_1_font = font_5
                         self.__message_1_color = color_message_red
                         self.__message_1_blinking = False
-                    if message_state == 6:            # error
+                    if message_state == 7:            # error
                         self.__message_1_font = font_5
                         self.__message_1_color = color_message_red
                         self.__message_1_blinking = False   # True
-                    if message_state == 7:            # invalid value
+                    if message_state == 8:            # invalid value
                         self.__message_1_font = font_5
                         self.__message_1_color = color_message_white
                         self.__message_1_blinking = False   # True
                     self.__message_2_to_display = DISPLAY_STATUS_2[message_sub_state]
-                    if message_state == 6:
+                    if message_state == 7:
                         self.__message_2_to_display = "Error Message # " + str(error_msg)
                     self.__message_2_font = font_4
                     self.__message_2_color = color_message_white
@@ -967,31 +1038,37 @@ class NodesCan:
                         self.__message_1_font = font_5
                         self.__message_1_color = color_message_red
                         self.__message_1_blinking = False
-                        self.__message_2_to_display = "Connect a Charging Cable"
+                        self.__message_2_to_display = "Plug-in to start Charging"
                         self.__message_2_font = font_4
                         self.__message_2_color = color_message_white
                         self.__message_2_blinking = False
                     else:
-                        if message_state == 0:  # self-testing
-                            self.__message_1_to_display = "SELF-TESTING"
+                        if message_state == 0:  # power-up
+                            self.__message_1_to_display = "POWER-UP"
                             self.__message_1_font = font_4
                             self.__message_1_color = color_message_white
                             self.__message_1_blinking = False
                             self.__message_2_to_display = ''
-                        if message_state == 1:  # standby
+                        if message_state == 1:  # self-testing
+                            self.__message_1_to_display = "SELF-TESTING"
+                            self.__message_1_font = font_5
+                            self.__message_1_color = color_message_white
+                            self.__message_1_blinking = False
+                            self.__message_2_to_display = ''
+                        if message_state == 2:  # standby
                             self.__message_1_to_display = "STANDBY"
                             self.__message_1_font = font_5
                             self.__message_1_color = color_message_blue
                             self.__message_1_blinking = False
                             if message_sub_state == 1:
-                                self.__message_2_to_display = "Connect a Charging Cable"
+                                self.__message_2_to_display = "Plug-in to start Charging"
                                 self.__message_2_font = font_4
                                 self.__message_2_color = color_message_white
                                 self.__message_2_blinking = False
                             else:
                                 if message_sub_state == 0:
-                                    self.__message_2_to_display = "Press Cancel to Enter your PIN"
-                                    self.__message_2_font = font_7
+                                    self.__message_2_to_display = "Press \'Cancel\' and Enter your PIN"
+                                    self.__message_2_font = font_9
                                     self.__message_2_color = color_message_white
                                     self.__message_2_blinking = False
                                 else:
@@ -999,7 +1076,7 @@ class NodesCan:
                                     self.__message_2_font = font_4
                                     self.__message_2_color = color_message_white
                                     self.__message_2_blinking = False
-                        if message_state == 2:  # car connected
+                        if message_state == 3:  # car connected
                             self.__message_1_to_display = "CAR CONNECTED"
                             self.__message_1_font = font_5
                             self.__message_1_color = color_message_blue
@@ -1011,8 +1088,8 @@ class NodesCan:
                                 self.__message_2_blinking = False
                             else:
                                 if message_sub_state == 0:
-                                    self.__message_2_to_display = "Press Cancel to Enter your PIN"
-                                    self.__message_2_font = font_7
+                                    self.__message_2_to_display = "Press \'Cancel\' and Enter your PIN"
+                                    self.__message_2_font = font_9
                                     self.__message_2_color = color_message_white
                                     self.__message_2_blinking = False
                                 else:
@@ -1020,7 +1097,7 @@ class NodesCan:
                                     self.__message_2_font = font_4
                                     self.__message_2_color = color_message_white
                                     self.__message_2_blinking = False
-                        if message_state == 3:  # charging
+                        if message_state == 4:  # charging
                             self.__message_1_to_display = "CHARGING"
                             self.__message_1_font = font_5
                             self.__message_1_color = color_message_green
@@ -1029,38 +1106,38 @@ class NodesCan:
                             self.__message_2_font = font_4
                             self.__message_2_color = color_message_white
                             self.__message_2_blinking = False
-                        if message_state == 4:  # charging complete
+                        if message_state == 5:  # charging complete
                             self.__message_1_to_display = "CHARGING COMPLETE"
                             self.__message_1_font = font_5a
                             self.__message_1_color = color_message_green
                             self.__message_1_blinking = False
-                            self.__message_2_to_display = "Unplug a Charging Cable"
+                            self.__message_2_to_display = ''
                             self.__message_2_font = font_4
                             self.__message_2_color = color_message_white
                             self.__message_2_blinking = False
-                        if message_state == 5:  # node disabled
+                        if message_state == 6:  # node disabled
                             self.__message_1_to_display = "DISABLED"
                             self.__message_1_font = font_5
                             self.__message_1_color = color_message_red
                             self.__message_1_blinking = False
-                            self.__message_2_to_display = 'Press Cancel to Enter your PIN'
-                            self.__message_2_font = font_4
+                            self.__message_2_to_display = ''
+                            self.__message_2_font = font_9
                             self.__message_2_color = color_message_white
                             self.__message_2_blinking = False
-                        if message_state == 6:  # error
+                        if message_state == 7:  # error
                             self.__message_1_to_display = "ERROR"
                             self.__message_1_font = font_5
                             self.__message_1_color = color_message_red
-                            self.__message_1_blinking = False       # True
+                            self.__message_1_blinking = True       # False
                             self.__message_2_to_display = "Error Message # " + str(error_msg)
                             self.__message_2_font = font_4
                             self.__message_2_color = color_message_white
                             self.__message_2_blinking = False
-                        if message_state == 7:  # invalid value
+                        if message_state == 8:  # invalid value
                             self.__message_1_to_display = ''
                             self.__message_1_font = font_5
                             self.__message_1_color = color_message_red
-                            self.__message_1_blinking = False       # True
+                            self.__message_1_blinking = True       # False
                             self.__message_2_to_display = ''  # "Use another Charger"
                             self.__message_2_font = font_4
                             self.__message_2_color = color_message_white
@@ -1114,7 +1191,7 @@ class NodesCan:
     def message_parsing(self, msg):
         msg_received_ok = msg is not None
         if msg_received_ok:
-            state = len(DISPLAY_STATUS_1) - 1
+            state = len(DISPLAY_STATUS_1_V2) - 1
             sub_state = len(DISPLAY_STATUS_2) - 1
             if len(msg.data) > 0:
                 if msg.data[0] < state:
@@ -1135,27 +1212,31 @@ class NodesCan:
                     # self.__current_node_active.set_state(state)
                     self.__current_node_active.set_sub_state_saved(sub_state)
                 car_get_disconnected = \
-                    (old_state == 0x02 or old_state == 0x03 or old_state == 0x04) and state == 0x01
+                    (old_state == 0x03 or old_state == 0x04 or old_state == 0x05) and state == 0x02
                 if car_get_disconnected:
                     self.disable_charging_node_number(self.__node_count)
                 if force_charging_enabled:
                     if not self.__restart_state and sub_state == 0:
                         self.enable_charging_node_number(self.__node_count)
-                if node_reset_when_cable_detached:
-                    node_need_to_reset = (old_state == 0x03 or old_state == 0x04) and state == 0x01
-                    if node_need_to_reset:
+                if node_reset_when_user_unplug_cable:
+                    if (old_state == 0x04 or old_state == 0x05) and state == 0x02:
                         self.hard_reset_node_number(self.__node_count)
                 if node_reset_when_can_reconnected:
-                    if self.__current_node_active.get_flag_node_to_reset():
-                        self.hard_reset_node_number(self.__node_count)
-                        self.__current_node_active.clear_flag_node_to_reset()
+                    # if self.__current_node_active.get_flag_node_to_reset():
+                    #     self.hard_reset_node_number(self.__node_count)
+                    #     self.__current_node_active.clear_flag_node_to_reset()
+                    node_need_reset = self.__current_node_active.get_flag_node_to_reset()
+                    if node_need_reset and self.__flag_reset_per_cycle_active:
+                        self.hard_reset_current_node()
+                        self.__flag_reset_per_cycle_active = False
                 self.__current_node_active.set_current_measured_high(cur_measured_high)
                 self.__current_node_active.set_current_measured_low(cur_measured_low)
         if self.__current_node_active is not None:
             msg_old_ok = self.__current_node_active.get_node_connected()
             self.__current_node_active.set_node_connected(msg_received_ok)
-            if not msg_old_ok and msg_received_ok:
-                self.__current_node_active.set_flag_node_to_reset()
+            if node_reset_when_can_reconnected:
+                if not msg_old_ok and msg_received_ok:
+                    self.__current_node_active.set_flag_node_to_reset()
 
     def node_control(self):
         if self.__restart_state:
@@ -1163,18 +1244,16 @@ class NodesCan:
             cycle_shift = self.__node_count
             if self.__restart_cycles_count == 1 * cycle_length:
                 self.poll_node(self.msg_disable_node())
-            if self.__restart_cycles_count == 2 * cycle_length:
-                self.poll_node(self.msg_set_current(0x02))
+            if self.__restart_cycles_count == 2 * cycle_length + cycle_shift:
+                self.poll_node(self.msg_set_current(0x08))
             if self.__restart_cycles_count == 3 * cycle_length + cycle_shift:
                 self.poll_node(self.msg_self_test())
-            if self.__restart_cycles_count == 4 * cycle_length + cycle_shift:
+            if self.__restart_cycles_count == 6 * cycle_length + cycle_shift:
                 self.poll_node(self.msg_disable_node())
-            if self.__restart_cycles_count == 5 * cycle_length + cycle_shift:
-                self.poll_node(self.msg_set_standby())
             if self.__restart_cycles_count == 7 * cycle_length + cycle_shift:
-                self.poll_node(self.msg_set_standby())
-            if self.__restart_cycles_count == 8 * cycle_length + cycle_shift:
                 self.poll_node(self.msg_set_current(0x28))
+            if self.__restart_cycles_count == 8 * cycle_length + cycle_shift:
+                self.poll_node(self.msg_set_standby())
             if self.__restart_cycles_count == 9 * cycle_length + cycle_shift:
                 node_was_charging_enabled = False
                 if self.__current_node_active is not None:
@@ -1195,13 +1274,15 @@ class NodesCan:
             time_text = ''
         self.__label_time.configure(text=time_text)
         if key_pad.read_key():
-            self.print_key_to_terminal()
+            if terminal_output:
+                self.print_key_info_to_terminal()
+            key_pad.generate_events()
         if poll_active:
             if not self.__blinking_enabled:
                 self.enable_blinking()
             if terminal_output and terminal_header and self.__node_bank_count == 0 and self.__node_count == 0:
                 self.print_terminal_header()
-            if self.__node_bank_count == 0 and self.__node_count in nodes_tested:
+            if self.__node_bank_count == 0 and self.__node_count in nodes_supported:
                 self.__current_node_active = self.get_active_node_by_can_number(self.__node_count)
                 poll_response = self.poll_node(self.msg_get_state_polling())
                 self.message_parsing(poll_response)
@@ -1214,6 +1295,7 @@ class NodesCan:
                 self.__node_bank_count += 1
                 if self.__node_bank_count == CAN_BANKS_MAX:
                     self.__node_bank_count = 0
+                    self.__flag_reset_per_cycle_active = True
                     if self.__restart_state:
                         self.__restart_cycles_count += 1
                         if self.__restart_cycles_count == self.__restart_cycles_max:
@@ -1233,6 +1315,7 @@ class NodesFunc:
 
     def __init__(self, nodes_static):
         self.__nodes = nodes_static
+        self.__restart_times = [datetime.now()] * len(nodes_supported)
         self.__label_active = True
         self.__label_double = False
         self.__label_triple = False
@@ -1240,26 +1323,49 @@ class NodesFunc:
         self.__can0 = None
         self.__cycle_count = 0
         self.__node_count = 0
+        self.__current_max = 0x28
         self.label_time = tk.Label(frame_4,
                                    text='',
-                                   font=font_4,
+                                   # font=font_4,
+                                   font=font_7,
                                    fg=color_front,
                                    bg=color_back)
         self.label_time.place(relx=0.9, rely=0.05, anchor='ne')
         self.__text_out = ''
+        label_4_2.configure(font=font_4)
+        label_4_2.place(relx=0.5, rely=0.45, anchor='n')
+        label_4_3.place_forget()
 
+        self.label_ver = tk.Label(frame_4,
+                                  font=font_14a,
+                                  text='',
+                                  fg=color_front,
+                                  bg=color_back)
+        self.label_ver.place(relx=0.5, rely=0.75, anchor='n')
+        self.label_serial_num = tk.Label(frame_4,
+                                         font=font_14a,
+                                         text='',
+                                         fg=color_front,
+                                         bg=color_back)
+        self.label_serial_num.place(relx=0.5, rely=0.8, anchor='n')
+        self.__text_version_first = ''
+        self.__text_version_last = ''
+        self.__text_serial_num_first = ''
+        self.__text_serial_num_last = ''
+
+        if os.name == 'posix':
+            # noinspection SpellCheckingInspection
+            os.system('sudo ip link set can0 type can bitrate 125000')
+            os.system('sudo ifconfig can0 txqueuelen 65536')
+            os.system('sudo ifconfig can0 up')
         # noinspection SpellCheckingInspection
-        os.system('sudo ip link set can0 type can bitrate 125000')
-        # noinspection SpellCheckingInspection
-        os.system('sudo ifconfig can0 txqueuelen 65536')
-        os.system('sudo ifconfig can0 up')
-        # noinspection SpellCheckingInspection
-        self.__can0 = can.interface.Bus(channel='can0', bustype='socketcan_ctypes')
+        self.__can0 = can.interface.Bus(channel='can0', bustype='socketcan')
 
         self.update()
 
     def __del__(self):
-        os.system('sudo ifconfig can0 down')
+        if os.name == 'posix':
+            os.system('sudo ifconfig can0 down')
 
     def get_nodes(self):
         return self.__nodes
@@ -1268,97 +1374,254 @@ class NodesFunc:
         msg_r = self.__can0.recv(RESPONSE_MAX_TIME)
         if msg_r is None:
             print("Timeout occurred, no Message")
-            if node_n == 0:
+            if node_n == NODE_DISPLAYED_IN_DEBUG:
                 self.__text_out = "Timeout occurred\n no Message"
         else:
             print(msg_r)
-            if node_n == 0:
+            if node_n == NODE_DISPLAYED_IN_DEBUG:
                 if msg_r.arbitration_id & 0x0F == 0:
-                    self.__text_out = DISPLAY_STATUS_1[int(msg_r.data[0])]\
-                                      + '\n\n'\
+                    self.__text_out = DISPLAY_STATUS_1_V2[int(msg_r.data[0])] \
+                                      + '\n'\
                                       + DISPLAY_STATUS_2[int(msg_r.data[1])]
+            if msg_r.arbitration_id & 0x0F >= 9 or msg_r.arbitration_id & 0x0F <= 12:
+                msg_hex = False
+                for sym in msg_r.data:
+                    if sym < 0x20 or sym > 0x7E:
+                        msg_hex = True
+                if msg_hex:
+                    msg_txt = ''.join(' ' + format(i, '02X') for i in msg_r.data)
+                else:
+                    msg_txt = ' \'' + ''.join(chr(i) for i in msg_r.data) + '\''
+                if msg_r.arbitration_id & 0x0F == 9:
+                    print("Node# ", node_n, "   Firmware Version (first) = ", msg_txt)
+                if msg_r.arbitration_id & 0x0F == 10:
+                    print("Node# ", node_n, "   Firmware Version (last) = ", msg_txt)
+                if msg_r.arbitration_id & 0x0F == 11:
+                    print("Node# ", node_n, "   Serial Number (first) = ", msg_txt)
+                if msg_r.arbitration_id & 0x0F == 12:
+                    print("Node# ", node_n, "   Serial Number (last) = ", msg_txt)
+                if node_n == NODE_DISPLAYED_IN_DEBUG:
+                    if msg_r.arbitration_id & 0x0F == 9:
+                        self.__text_version_first = msg_txt
+                        self.label_ver.configure(text="Firmware Version ="
+                                                      + self.__text_version_first
+                                                      + " ." + self.__text_version_last)
+                    if msg_r.arbitration_id & 0x0F == 10:
+                        self.__text_version_last = msg_txt
+                        self.label_ver.configure(text="Firmware Version ="
+                                                      + self.__text_version_first
+                                                      + " ." + self.__text_version_last)
+                    if msg_r.arbitration_id & 0x0F == 11:
+                        self.__text_serial_num_first = msg_txt
+                        self.label_serial_num.configure(text="Serial Number ="
+                                                             + self.__text_serial_num_first
+                                                             + " -" + self.__text_serial_num_last)
+                    if msg_r.arbitration_id & 0x0F == 12:
+                        self.__text_serial_num_last = msg_txt
+                        self.label_serial_num.configure(text="Serial Number ="
+                                                             + self.__text_serial_num_first
+                                                             + " -" + self.__text_serial_num_last)
 
     def poll_node(self, cycle_n, node_n):
-        if node_n < 3:
-            if cycle_n == 20 + node_n * 5:
+        if node_n in nodes_supported and node_n in nodes_debugged:
+            node_index = nodes_debugged.index(node_n)
+            if cycle_n == 20 + node_index * 10:
+                msg8 = can.Message(arbitration_id=0x408 | node_n << 4,
+                                   data=[0x08],
+                                   is_extended_id=False)
+                self.__can0.send(msg8)
+                self.msg_response(node_n)
+                self.__restart_times[node_n] = datetime.now()
+                # time.sleep(2.0)
+
+            if cycle_n == 60 + node_index * 10:
+                msg7 = can.Message(arbitration_id=0x407 | node_n << 4,
+                                   data=[0x07],
+                                   is_extended_id=False)
+                self.__can0.send(msg7)
+                self.msg_response(node_n)
+
+            if cycle_n == 100 + node_index * 10:   # 20 + node_n * 5:
                 msg1 = can.Message(arbitration_id=0x401 | node_n << 4,
                                    data=[0x01],
-                                   extended_id=False)
+                                   is_extended_id=False)
                 self.__can0.send(msg1)
                 self.msg_response(node_n)
 
-            if cycle_n == 23 + node_n * 5:
+            # if cycle_n == 70 + node_index * 10:     # 23 + node_index * 5:
+            #     msg7 = can.Message(arbitration_id=0x407 | node_n << 4,
+            #                        data=[0x07],
+            #                        is_extended_id=False)
+            #     self.__can0.send(msg7)
+            #     self.msg_response(node_n)
+
+            if cycle_n == 140 + node_index * 10:
                 msg7 = can.Message(arbitration_id=0x407 | node_n << 4,
                                    data=[0x07],
-                                   extended_id=False)
+                                   is_extended_id=False)
                 self.__can0.send(msg7)
                 self.msg_response(node_n)
 
-            if cycle_n == 40 + node_n * 5 or cycle_n == 60 + node_n * 5:
-                msg2 = can.Message(arbitration_id=0x402 | node_n << 4,
-                                   data=[0x02,
-                                         0x02,
-                                         0x02],
-                                   extended_id=False)
-                self.__can0.send(msg2)
+            if cycle_n == 180 + node_index * 10:
+                msg6 = can.Message(arbitration_id=0x406 | node_n << 4,
+                                   data=[0x06,
+                                         self.__current_max],
+                                   is_extended_id=False)
+                self.__can0.send(msg6)
                 self.msg_response(node_n)
-                # time.sleep(1.0)
 
-            if cycle_n == 100:
+            if cycle_n == 220 + node_index * 10:    # 180
+                msg9 = can.Message(arbitration_id=0x409 | node_n << 4,
+                                   data=[0x09],
+                                   is_extended_id=False)
+                self.__can0.send(msg9)
+                self.msg_response(node_n)
+
+            if cycle_n == 225 + node_index * 10:    # 185
+                msg10 = can.Message(arbitration_id=0x40A | node_n << 4,
+                                    data=[0x0A],
+                                    is_extended_id=False)
+                self.__can0.send(msg10)
+                self.msg_response(node_n)
+
+            if cycle_n == 260 + node_index * 10:    # 220
+                msg11 = can.Message(arbitration_id=0x40B | node_n << 4,
+                                    data=[0x0B],
+                                    is_extended_id=False)
+                self.__can0.send(msg11)
+                self.msg_response(node_n)
+
+            if cycle_n == 265 + node_index * 10:    # 225
+                msg12 = can.Message(arbitration_id=0x40C | node_n << 4,
+                                    data=[0x0C],
+                                    is_extended_id=False)
+                self.__can0.send(msg12)
+                self.msg_response(node_n)
+
+            # if cycle_n == 100:
+            #     msg5 = can.Message(arbitration_id=0x405 | node_n << 4,
+            #                        data=[0x05,
+            #                              0x00,
+            #                              0x28],
+            #                        is_extended_id=False)
+            #     self.__can0.send(msg5)
+            #     self.msg_response(node_n)
+
+            if cycle_n == 300 + node_index * 10:    # 260
                 msg5 = can.Message(arbitration_id=0x405 | node_n << 4,
                                    data=[0x05,
-                                         0x00,
                                          0x28],
-                                   extended_id=False)
+                                   is_extended_id=False)
                 self.__can0.send(msg5)
                 self.msg_response(node_n)
 
-            if cycle_n == 120:
+            # if cycle_n == 40 + node_index * 5 or cycle_n == 60 + node_index * 5:
+            #     msg2 = can.Message(arbitration_id=0x402 | node_n << 4,
+            #                        data=[0x02,
+            #                              0x02,
+            #                              0x02],
+            #                        is_extended_id=False)
+            #     self.__can0.send(msg2)
+            #     self.msg_response(node_n)
+            #     # time.sleep(1.0)
+
+            if cycle_n == 340 + node_index * 10:    # 300
+                msg2 = can.Message(arbitration_id=0x402 | node_n << 4,
+                                   data=[0x02],
+                                   is_extended_id=False)
+                self.__can0.send(msg2)
+                self.msg_response(node_n)
+
+            if cycle_n == 380 + node_index * 10:    # 340
                 msg3 = can.Message(arbitration_id=0x403 | node_n << 4,
                                    data=[0x03],
-                                   extended_id=False)
+                                   is_extended_id=False)
                 self.__can0.send(msg3)
                 self.msg_response(node_n)
 
-            if cycle_n == 180:
-                msg4 = can.Message(arbitration_id=0x404 | node_n << 4,
-                                   data=[0x04],
-                                   extended_id=False)
-                self.__can0.send(msg4)
-                self.msg_response(node_n)
-
-            if cycle_n == 220:
+            if cycle_n == 460 + node_index * 10:
                 msg5 = can.Message(arbitration_id=0x405 | node_n << 4,
                                    data=[0x05,
-                                         0x00,
-                                         0x02],
-                                   extended_id=False)
+                                         0x30],
+                                   is_extended_id=False)
                 self.__can0.send(msg5)
                 self.msg_response(node_n)
 
-            if cycle_n == 240:
+            if cycle_n == 540 + node_index * 10:
+                msg5 = can.Message(arbitration_id=0x405 | node_n << 4,
+                                   data=[0x05,
+                                         0x20],
+                                   is_extended_id=False)
+                self.__can0.send(msg5)
+                self.msg_response(node_n)
+
+            if cycle_n == 620 + node_index * 10:
+                msg5 = can.Message(arbitration_id=0x405 | node_n << 4,
+                                   data=[0x05,
+                                         0x18],
+                                   is_extended_id=False)
+                self.__can0.send(msg5)
+                self.msg_response(node_n)
+
+            if cycle_n == 700 + node_index * 10:
+                msg5 = can.Message(arbitration_id=0x405 | node_n << 4,
+                                   data=[0x05,
+                                         0x10],
+                                   is_extended_id=False)
+                self.__can0.send(msg5)
+                self.msg_response(node_n)
+
+            if cycle_n == 780 + node_index * 10:    # 580
+                msg4 = can.Message(arbitration_id=0x404 | node_n << 4,
+                                   data=[0x04],
+                                   is_extended_id=False)
+                self.__can0.send(msg4)
+                self.msg_response(node_n)
+
+            if cycle_n == 820 + node_index * 10:    # 620
                 msg7 = can.Message(arbitration_id=0x407 | node_n << 4,
                                    data=[0x07],
-                                   extended_id=False)
+                                   is_extended_id=False)
                 self.__can0.send(msg7)
                 self.msg_response(node_n)
 
-            msg0 = can.Message(arbitration_id=0x400 | node_n << 4,
-                               data=[0],
-                               extended_id=False)
-            self.__can0.send(msg0)
-            self.msg_response(node_n)
+            # if cycle_n == 220:
+            #     msg5 = can.Message(arbitration_id=0x405 | node_n << 4,
+            #                        data=[0x05,
+            #                              0x00,
+            #                              0x08],
+            #                        is_extended_id=False)
+            #     self.__can0.send(msg5)
+            #     self.msg_response(node_n)
+
+            if cycle_n == 860 + node_index * 10:       # 660 # 340:
+                msg5 = can.Message(arbitration_id=0x405 | node_n << 4,
+                                   data=[0x05,
+                                         0x08],
+                                   is_extended_id=False)
+                self.__can0.send(msg5)
+                self.msg_response(node_n)
+
+            # msg0 = can.Message(arbitration_id=0x400 | node_n << 4,
+            #                    data=[0],
+            #                    is_extended_id=False)
+            # self.__can0.send(msg0)
+            # self.msg_response(node_n)
+
+            if datetime.now() - self.__restart_times[node_n] > timedelta(milliseconds=2000):
+                msg0 = can.Message(arbitration_id=0x400 | node_n << 4,
+                                   data=[0],
+                                   is_extended_id=False)
+                self.__can0.send(msg0)
+                self.msg_response(node_n)
 
     def update(self):
         sec_hundred = datetime.now().strftime("%H:%M:%S.%f")[:-4]
         self.label_time.configure(text=sec_hundred)
         if self.__label_active:
-            label_4_2.configure(text=self.__text_out,
-                                font=font_4)
-            label_4_2.place(relx=0.5, rely=0.3, anchor='n')
+            label_4_2.configure(text=self.__text_out)
         else:
-            label_4_2.configure(text='',
-                                font=font_4)
+            label_4_2.configure(text='')
         tm = time.time()
         if poll_active:
             if int((tm - self.__time_stamp) * 1000) > 350:
@@ -1380,8 +1643,22 @@ class NodesFunc:
             if self.__node_count == NODES_MAX:
                 self.__node_count = 0
                 self.__cycle_count += 1
-                if self.__cycle_count == 300:
+                # if self.__cycle_count == 720:     # 300
+                if self.__cycle_count == 920:
                     self.__cycle_count = 0
+                    if self.__current_max == 0x28:
+                        self.__current_max = 0x38
+                    else:
+                        if self.__current_max == 0x38:
+                            self.__current_max = 0x18
+                        else:
+                            self.__current_max = 0x28
+                    self.__text_version_first = ''
+                    self.__text_version_last = ''
+                    self.__text_serial_num_first = ''
+                    self.__text_serial_num_last = ''
+                    self.label_ver.configure(text='')
+                    self.label_serial_num.configure(text='')
         else:
             self.__time_stamp = tm
             self.__label_active = True
@@ -1537,7 +1814,7 @@ def screen_save_event_gen():
     global screen_save_event_counter
     screen_save_event_counter -= 1
     if screen_save_event_counter == 0:
-        frame_4.event_generate('<<screen_save_event>>', when='tail')
+        frame_4.event_generate('<<User_Screen_Saver_Time_Expired>>', when='tail')
 
 
 def waiting_connection_start(node_n):
@@ -1561,14 +1838,15 @@ def check_connection_event_gen():
         for node_n in wait_connection_queue:
             if wait_connection_node == node_n:
                 wait_connection_node = -1
-        frame_4.event_generate('<<wait_connection_event>>', when='tail')
+        frame_4.event_generate('<<Connection_Waiting_Time_Expired>>', when='tail')
 
 
 # noinspection PyUnusedLocal
 def to_finish_waiting_connection(event):
     global wait_connection_node
-    if nodes_can is not None:
-        nodes_can.check_node_when_waiting_connection_finished(wait_connection_node)
+    if not debug_mode:
+        if nodes_can is not None:
+            nodes_can.check_node_when_waiting_connection_finished(wait_connection_node)
 
 
 def show_service_key_message(msg):
@@ -1884,14 +2162,16 @@ def to_fourth_screen(event):
     global frame_num
     frame_num = 4
     frame_3.pack_forget()
-    current_node = str(node_num)
-    label_4_1.configure(text=" Charger # " + current_node + " ")
+    if debug_mode:
+        label_4_1.configure(text=" Charger # " + str(NODE_DISPLAYED_IN_DEBUG) + ' ')
+    else:
+        label_4_1.configure(text=" Charger # " + str(node_num) + ' ')
+        if nodes_can is not None:
+            nodes_can.set_node_user_selected(node_num)
+            waiting_connection_start(node_num)
+    screen_saver_start()
     frame_4.pack(fill="both", expand=True)
     frame_4.focus_set()
-    screen_saver_start()
-    if nodes_can is not None:
-        nodes_can.set_node_user_selected(node_num)
-        waiting_connection_start(node_num)
 
 
 # noinspection PyUnusedLocal
@@ -1915,8 +2195,8 @@ def to_second_screen(event):
     frame_num = 2
     frame_2.pack(fill="both", expand=True)
     name_node_num.set(node_num)
-    entry_2_1_2.focus_set()
-    entry_2_1_2.select_range(0, tk.END)
+    entry_2.focus_set()
+    entry_2.select_range(0, tk.END)
 
 
 # noinspection PyUnusedLocal
@@ -1924,11 +2204,14 @@ def to_first_screen(event):
     global frame_num
     if frame_num == 0:
         frame_0.pack_forget()
+    if frame_num == 4:
+        frame_4.pack_forget()
     if frame_num == 108:
         frame_a_8_2.pack_forget()
         frame_a_8_3.pack_forget()
         frame_a_8_4.pack_forget()
     frame_num = 1
+    name_pin.set('')
     frame_1.pack(fill="both", expand=True)
     entry_1.focus_set()
 
@@ -1988,7 +2271,6 @@ def to_zero_screen(event):
     elif frame_num == 111:
         frame_a_11.pack_forget()
     frame_num = 0
-    name_pin.set('')
     frame_0.pack(fill="both", expand=True)
     frame_0.focus_set()
 
@@ -1996,34 +2278,37 @@ def to_zero_screen(event):
 # noinspection PyUnusedLocal
 def time_label_on_off(event):
     global time_label_active
-    if time_label_active:
-        time_label_active = False
-        show_service_key_message("TIME hidden")
-    else:
-        time_label_active = True
-        show_service_key_message("TIME displayed")
+    if not debug_mode:
+        if time_label_active:
+            time_label_active = False
+            show_service_key_message("NO TIME Label")
+        else:
+            time_label_active = True
+            show_service_key_message("TIME Label")
 
 
 # noinspection PyUnusedLocal
 def hundreds_label_on_off(event):
     global hundreds_label_active
-    if hundreds_label_active:
-        hundreds_label_active = False
-        show_service_key_message("HUNDREDTHS of a Second hidden")
-    else:
-        hundreds_label_active = True
-        show_service_key_message("HUNDREDTHS of a Second displayed")
+    if not debug_mode:
+        if hundreds_label_active:
+            hundreds_label_active = False
+            show_service_key_message("NO HUNDREDTHS of a Second")
+        else:
+            hundreds_label_active = True
+            show_service_key_message("HUNDREDTHS of a Second")
 
 
 # noinspection PyUnusedLocal
 def show_node_user_or_admin(event):
     global show_node_status_in_admin_mode
-    if show_node_status_in_admin_mode:
-        show_node_status_in_admin_mode = False
-        show_service_key_message("USER Mode")
-    else:
-        show_node_status_in_admin_mode = True
-        show_service_key_message("ADMIN Mode")
+    if not debug_mode:
+        if show_node_status_in_admin_mode:
+            show_node_status_in_admin_mode = False
+            show_service_key_message("USER Mode")
+        else:
+            show_node_status_in_admin_mode = True
+            show_service_key_message("ADMIN Mode")
 
 
 # noinspection PyUnusedLocal
@@ -2042,91 +2327,109 @@ def poll_on_off(event):
     global poll_active
     if poll_active:
         poll_active = False
-        show_service_key_message("Polling CAN-Bus Stopped")
+        show_service_key_message("CAN-Bus STOP")
     else:
         poll_active = True
-        show_service_key_message("Polling CAN-Bus Resumed")
+        show_service_key_message("CAN-Bus ON")
 
 
 # noinspection PyUnusedLocal
-def can1_on_off(event):
-    global can1_configured
-    if can1_configured:
-        can1_configured = False
-        # show_service_key_message("CAN1 Inactive")
-    else:
-        can1_configured = True
-        # show_service_key_message("CAN1 Activated")
+def node_reset_when_user_unplug_cable_on_off(event):
+    global node_reset_when_user_unplug_cable
+    if not debug_mode:
+        if node_reset_when_user_unplug_cable:
+            node_reset_when_user_unplug_cable = False
+            show_service_key_message("NODE RESET after User Unplugs - DISABLED")
+        else:
+            node_reset_when_user_unplug_cable = True
+            show_service_key_message("NODE RESET after User Unplugs - ENABLED")
+
+
+# # noinspection PyUnusedLocal
+# def can1_on_off(event):
+#     global can1_configured
+#     if can1_configured:
+#         can1_configured = False
+#         # show_service_key_message("CAN1 Inactive")
+#     else:
+#         can1_configured = True
+#         # show_service_key_message("CAN1 Activated")
 
 
 # noinspection PyUnusedLocal
 def nodes_restart(event):
-    if nodes_can is not None:
-        nodes_can.set_restart()
-        nodes_can.increment_restart_mode()
-        res_mode = nodes_can.get_restart_mode()
-        if res_mode == 1:
-            show_service_key_message("RESTARTING Nodes, Charging Disabled")
-        else:
-            if res_mode == 2:
-                show_service_key_message("RESTARTING Nodes, Charging Enabled")
+    if not debug_mode:
+        if nodes_can is not None:
+            nodes_can.set_restart()
+            nodes_can.increment_restart_mode()
+            res_mode = nodes_can.get_restart_mode()
+            if res_mode == 1:
+                show_service_key_message("RESTARTING Nodes - All Disabled")
             else:
-                show_service_key_message("RESTARTING Nodes")
-
-
-# noinspection PyUnusedLocal
-def node_restart_when_charging_cable_detached_on_off(event):
-    global node_reset_when_cable_detached
-    if node_reset_when_cable_detached:
-        node_reset_when_cable_detached = False
-        show_service_key_message("NODE RESET when Charging Cable Detached - DISABLED")
-    else:
-        node_reset_when_cable_detached = True
-        show_service_key_message("NODE RESET when Charging Cable Detached - ENABLED")
-
-
-# noinspection PyUnusedLocal
-def node_reset_when_can_reconnected_on_off(event):
-    global node_reset_when_can_reconnected
-    if node_reset_when_can_reconnected:
-        node_reset_when_can_reconnected = False
-        show_service_key_message("NODE RESET when CAN-Bus Connection Restored - DISABLED")
-    else:
-        node_reset_when_can_reconnected = True
-        show_service_key_message("NODE RESET when CAN-Bus Connection Restored - ENABLED")
+                if res_mode == 2:
+                    show_service_key_message("RESTARTING Nodes - All Enabled")
+                else:
+                    show_service_key_message("RESTARTING Nodes - All Restored")
 
 
 # noinspection PyUnusedLocal
 def force_charging_enabled_on_off(event):
     global force_charging_enabled
-    if force_charging_enabled:
-        force_charging_enabled = False
-        show_service_key_message("STOP Forced CHARGING ENABLED")
-    else:
-        force_charging_enabled = True
-        show_service_key_message("Forced CHARGING ENABLED")
+    if not debug_mode:
+        if force_charging_enabled:
+            force_charging_enabled = False
+            show_service_key_message("Forced CHARGING DISABLED")
+        else:
+            force_charging_enabled = True
+            show_service_key_message("Forced CHARGING ENABLED")
+
+
+# noinspection PyUnusedLocal
+def node_soft_reset_when_node_get_disabled_on_off(event):
+    global node_reset_when_node_get_disabled
+    if not debug_mode:
+        if node_reset_when_node_get_disabled:
+            node_reset_when_node_get_disabled = False
+            show_service_key_message("NODE RESET if Unexpected Disable - INACTIVE")
+        else:
+            node_reset_when_node_get_disabled = True
+            show_service_key_message("NODE RESET if Unexpected Disable - ACTIVE")
+
+
+# noinspection PyUnusedLocal
+def node_reset_when_can_reconnected_on_off(event):
+    global node_reset_when_can_reconnected
+    if not debug_mode:
+        if node_reset_when_can_reconnected:
+            node_reset_when_can_reconnected = False
+            show_service_key_message("NODE RESET on CAN-Bus Reconnection - INACTIVE")
+        else:
+            node_reset_when_can_reconnected = True
+            show_service_key_message("NODE RESET on CAN-Bus Reconnection - ACTIVE")
 
 
 # noinspection PyUnusedLocal
 def terminal_on_off(event):
     global terminal_output
-    if terminal_output:
-        terminal_output = False
-        show_service_key_message("CAN-Bus LOG to Terminal Stopped")
-    else:
-        terminal_output = True
-        show_service_key_message("CAN-Bus LOG to Terminal Activated")
+    if not debug_mode:
+        if terminal_output:
+            terminal_output = False
+            show_service_key_message("NO CAN-Bus LOG to Terminal")
+        else:
+            terminal_output = True
+            show_service_key_message("CAN-Bus LOG to Terminal ACTIVE")
 
 
 # noinspection PyUnusedLocal
 def terminal_header_on_off(event):
     global terminal_header
-    if terminal_header:
-        terminal_header = False
-        show_service_key_message("No HEADERS in CAN-Bus Log")
-    else:
-        terminal_header = True
-        show_service_key_message("HEADERS in CAN-Bus Log Enabled")
+    if not debug_mode:
+        if terminal_header:
+            terminal_header = False
+            show_service_key_message("NO HEADERS in CAN-Bus Log")
+        else:
+            terminal_header = True
+            show_service_key_message("HEADERS in CAN-Bus Log ENABLED")
 
 
 def entry_node():
@@ -2287,23 +2590,25 @@ font_6_bold = tk_font.Font(family="Helvetica", size=20, weight="bold")
 font_7 = tk_font.Font(family="Helvetica", size=40)
 font_7_bold = tk_font.Font(family="Helvetica", size=40, weight="bold")
 font_8_bold = tk_font.Font(family="Helvetica", size=18, weight="bold")
+font_9 = tk_font.Font(family="Helvetica", size=36)
 font_9_bold = tk_font.Font(family="Helvetica", size=36, weight="bold")
 font_10_bold = tk_font.Font(family="Helvetica", size=28, weight="bold")
 font_11_bold = tk_font.Font(family="Helvetica", size=26, weight="bold")
 font_12_bold = tk_font.Font(family="Helvetica", size=12, weight="bold")
 font_13_bold = tk_font.Font(family="Helvetica", size=16, weight="bold")
+font_14a = tk_font.Font(family="Courier", size=14, weight="bold")
 font_14_bold = tk_font.Font(family="Helvetica", size=14, weight="bold")
 
 frame_0 = tk.Frame(root, bg=color_back)
 
 
-# noinspection PyUnusedLocal
 def key_press(event):
     if event.char == event.keysym or len(event.char) == 1:
         to_first_screen(event)
 
 
 frame_0.bind("<Key>", key_press)
+frame_0.bind("<<KpAnyKey>>", to_first_screen)
 frame_0.pack(fill="both", expand=True)
 frame_0.focus_set()
 
@@ -2359,14 +2664,30 @@ def get_entry_1(event):
     to_second_screen(event)
 
 
+def clear_entry_1(event):
+    if len(name_pin.get()) == 0:
+        to_zero_screen(event)
+    else:
+        entry_1.delete(0, tk.END)
+
+
+# noinspection PyUnusedLocal
+def insert_entry_1(event):
+    global num_pad_num_pressed
+    entry_1.insert(tk.END, num_pad_num_pressed)
+
+
 entry_1 = tk.Entry(frame_1,
                    textvariable=name_pin,
                    font=font_1_2,
                    width=PIN_TEXT_LENGTH,
-                   show='*',
+                   # show='*',
                    bg=color_entry_back)
+entry_1.bind("<Escape>", clear_entry_1)
+entry_1.bind("<<KpCancel>>", clear_entry_1)
 entry_1.bind("<Return>", get_entry_1)
-entry_1.bind("<Escape>", to_zero_screen)
+entry_1.bind("<<KpEnter>>", get_entry_1)
+entry_1.bind("<<KpNum>>", insert_entry_1)
 entry_1.place(relx=0.5, rely=0.5, anchor="c")
 entry_1.focus_set()
 
@@ -2377,13 +2698,6 @@ label_2 = tk.Label(frame_1, text="Press Cancel to return",
 label_2.place(relx=0.5, rely=0.85, anchor="n")
 
 frame_2 = tk.Frame(root, bg='white')
-
-
-def clear_entry(event):
-    if len(name_node_num.get()) == 0:
-        to_zero_screen(event)
-    else:
-        entry_2_1_2.delete(0, tk.END)
 
 
 frame_2_1 = tk.Frame(frame_2, bg='white')
@@ -2403,12 +2717,27 @@ label_2_1_2 = tk.Label(frame_2_1,
 label_2_1_2.place(relx=0.35, rely=0.7, anchor='c')
 
 button_2_1_1 = tk.Button(frame_2_1,
-                         text="$0.083",
+                         text="$0.082",
                          font=font_3)
 button_2_1_1.place(relx=0.75, rely=0.3, anchor='c')
 
 
-def get_entry(event):
+def clear_entry_2(event):
+    if len(name_node_num.get()) == 0:
+        to_zero_screen(event)
+    else:
+        entry_2.delete(0, tk.END)
+
+
+# noinspection PyUnusedLocal
+def insert_entry_2(event):
+    global num_pad_num_pressed
+    if entry_2.select_present():
+        entry_2.delete(0, tk.END)
+    entry_2.insert(tk.END, num_pad_num_pressed)
+
+
+def get_entry_2(event):
     global node_num
     try:
         node_num = int(name_node_num.get())
@@ -2420,14 +2749,17 @@ def get_entry(event):
         name_node_num.set('')
 
 
-entry_2_1_2 = tk.Entry(frame_2_1,
-                       textvariable=name_node_num,
-                       width=3,
-                       font=font_3)
-entry_2_1_2.bind('<Escape>', clear_entry)
-entry_2_1_2.bind('<Return>', get_entry)
-entry_2_1_2.bind("<<screen_save_event>>", to_zero_screen)
-entry_2_1_2.place(relx=0.75, rely=0.7, anchor='c')
+entry_2 = tk.Entry(frame_2_1,
+                   textvariable=name_node_num,
+                   width=3,
+                   font=font_3)
+entry_2.bind('<Escape>', clear_entry_2)
+entry_2.bind('<<KpCancel>>', clear_entry_2)
+entry_2.bind('<Return>', get_entry_2)
+entry_2.bind('<<KpEnter>>', get_entry_2)
+entry_2.bind("<<KpNum>>", insert_entry_2)
+entry_2.bind("<<User_Screen_Saver_Time_Expired>>", to_zero_screen)
+entry_2.place(relx=0.75, rely=0.7, anchor='c')
 
 label_2_2 = tk.Label(frame_2_2,
                      text="Press Enter to select",
@@ -2446,8 +2778,10 @@ label_2_3.place(relx=0.5, rely=0.65, anchor='c')
 frame_3 = tk.Frame(root, bg=color_back)
 
 frame_3.bind("<Escape>", to_second_screen)
+frame_3.bind("<<KpCancel>>", to_second_screen)
 frame_3.bind("<Return>", to_fourth_screen)
-frame_3.bind("<<screen_save_event>>", to_zero_screen)
+frame_3.bind("<<KpEnter>>", to_fourth_screen)
+frame_3.bind("<<User_Screen_Saver_Time_Expired>>", to_zero_screen)
 frame_3.focus_set()
 
 label_3_0 = tk.Label(frame_3,
@@ -2471,9 +2805,10 @@ label_3_2.place(relx=0.5, rely=0.9, anchor="n")
 
 frame_4 = tk.Frame(root, bg=color_back)
 
-frame_4.bind("<Escape>", to_zero_screen)
-frame_4.bind("<<screen_save_event>>", to_zero_screen)
-frame_4.bind("<<wait_connection_event>>", to_finish_waiting_connection)
+frame_4.bind("<Escape>", to_first_screen)
+frame_4.bind("<<KpCancel>>", to_first_screen)
+frame_4.bind("<<User_Screen_Saver_Time_Expired>>", to_zero_screen)
+frame_4.bind("<<Connection_Waiting_Time_Expired>>", to_finish_waiting_connection)
 
 label_4_0 = tk.Label(frame_4,
                      text='',
@@ -2500,7 +2835,8 @@ label_4_2 = tk.Label(frame_4,
 label_4_2.place(relx=0.5, rely=0.4625, anchor='n')
 
 label_4_3 = tk.Label(frame_4,
-                     text="Connect a Car",
+                     # text="Plug-in to start Charging",
+                     text="",
                      font=font_4,
                      fg=color_front,
                      bg=color_back)
@@ -2815,7 +3151,7 @@ label_a_31_233 = tk.Label(frame_a_31_2,
 label_a_31_233.place(relx=0.48, rely=0.74, anchor='c')
 
 label_a_31_234 = tk.Label(frame_a_31_2,
-                          text="to add a new Node",
+                          text="to add new Node",
                           font=font_6,
                           bg="white")
 label_a_31_234.place(relx=0.85, rely=0.75, anchor='e')
@@ -2837,7 +3173,7 @@ frame_a_32_1 = tk.Frame(frame_a_32, bg='white')
 frame_a_32_1.place(relwidth=1, relheight=0.2)
 
 label_a_32_1 = tk.Label(frame_a_32_1,
-                        text="Add a new Node",
+                        text="Add new Node",
                         font=font_3_bold,
                         fg=color_heading,
                         bg='white')
@@ -4312,7 +4648,7 @@ label_a_41_253 = tk.Label(frame_a_41_2,
 label_a_41_253.place(relx=0.46, rely=0.9, anchor='c')
 
 label_a_41_254 = tk.Label(frame_a_41_2,
-                          text="to ADD a NEW Power Line",
+                          text="to ADD NEW Power Line",
                           font=font_6,
                           bg="white")
 label_a_41_254.place(relx=0.9, rely=0.91, anchor='e')
@@ -5437,36 +5773,59 @@ label_a_11_3 = tk.Label(frame_a_11_3,
                         fg='white')
 label_a_11_3.place(relx=0.5, rely=0.5, anchor='c')
 
+
+# Hot-Keys for The Application Appearance
 root.bind("<Shift-Up>", to_full_screen)
 root.bind("<Shift-Down>", to_window)
 root.bind("<Shift-Escape>", to_zero_screen)
 
-root.bind("<Shift-F1>", time_label_on_off)
-root.bind("<Shift-F2>", hundreds_label_on_off)
+# Shift Hot-Keys for User Screens Appearance
+root.bind("<Shift-F2>", show_single_or_all_nodes)
 root.bind("<Shift-F3>", show_node_user_or_admin)
-root.bind("<Shift-F4>", show_single_or_all_nodes)
+root.bind("<Shift-F5>", time_label_on_off)
+root.bind("<Shift-F6>", hundreds_label_on_off)
 
-root.bind("<Shift-F5>", poll_on_off)
-root.bind("<Shift-F6>", can1_on_off)
-root.bind("<Shift-F7>", nodes_restart)
-root.bind("<Shift-F8>", force_charging_enabled_on_off)
-# root.bind("<Shift-F8>", can_restart)
+# Alt Hot-Keys for Logging Mode
+# root.bind("<Shift-F11>", terminal_on_off)
+root.bind("<Alt-F5>", terminal_on_off)
+# root.bind("<Shift-F12>", terminal_header_on_off)
+root.bind("<Alt-F6>", terminal_header_on_off)
 
-root.bind("<Shift-F9>", node_restart_when_charging_cable_detached_on_off)
-root.bind("<Shift-F10>", node_reset_when_can_reconnected_on_off)
+# Alt-Shift Hot-Keys for CAN-Bus Control
+# root.bind("<Shift-F5>", poll_on_off)
+root.bind("<Alt-Shift-C>", poll_on_off)
+# root.bind("<Ctrl-Shift-F6>", can1_on_off)
+
+# Ctrl Hot-Keys for Functioning Control
+# root.bind("<Shift-F10>", node_reset_when_can_reconnected_on_off)
+root.bind("<Control-F5>", node_reset_when_can_reconnected_on_off)
+# root.bind("<Shift-F9>", node_soft_reset_when_node_get_disabled_on_off)
+root.bind("<Control-F6>", node_soft_reset_when_node_get_disabled_on_off)
+# root.bind("<Alt-F6>", node_soft_reset_when_node_get_disabled_on_off)
+# root.bind("<Shift-F6>", node_reset_when_user_unplug_cable_on_off)
+root.bind("<Control-F12>", node_reset_when_user_unplug_cable_on_off)
+
+
+# Ctrl-Shift Hot-Keys for Restart and Debugging Mode
+# root.bind("<Shift-F7>", nodes_restart)
+root.bind("<Control-Shift-A>", nodes_restart)
+# root.bind("<Shift-F8>", force_charging_enabled_on_off)
+root.bind("<Control-Shift-C>", force_charging_enabled_on_off)
 # root.bind("<Shift-F9>", application_restart)
 # root.bind("<Shift-F10>", system_restart)
-root.bind("<Shift-F11>", terminal_on_off)
-root.bind("<Shift-F12>", terminal_header_on_off)
-
 
 frame_num = 0
+debug_mode = get_debug_mode()
 key_pad = KeyPad()
 power_lines = PowerLines()
 nodes = Nodes()
 users = Users()
 super_user = SuperUser()
 # nodes_cycle = NodesFunc(nodes)
-nodes_can = NodesCan(nodes)
+# nodes_can = NodesCan(nodes)
+if debug_mode:
+    nodes_cycle = NodesFunc(nodes)
+else:
+    nodes_can = NodesCan(nodes)
 
 root.mainloop()

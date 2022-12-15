@@ -14,18 +14,32 @@ v1_0  - first version for trial - polling, Shift-F5 to stop/start
            + watch on user's screen, Shift-F1 to hide/show, Shift-F2 hundreds second
            + terminal window output, Shift-F11 to stop/run, Shift-F12 to add headers
            + message on user's screen - Enabling / Charging Enabled
+	   + PCPH CAN protocol v2.0, User screen - Node #0 state only
 v1_1 - User's screen
 	   + to reduce initialization time
 	   + PCPH-CAN protocol states and substates to User's screen in service mode
 	   + Shift-F3 to switch User's screen between service and user's mode
 	   + added messages for user's mode
+	   + "Debug mode" - to define var's of "nodes set debugged" and "node displayed"
+	   + "Debug mode" - delay after reset, to keep another nodes timing
 v1_2 - PIN and User-Class connected functionality (partial parsing)
 	   + Charging Enabled when the proper PIN entered
 	   + Add the Method "get_active_node_by_can_number" in the Class "NodesCan"
 	   + Partial Parsing of CAN message to Charging Enable field
 	   + Charging Disable when CHARGE/CHARGING COMPLETE to CAR DISCONNECTED state
-	   + nodes_tested added to main-cycle to limit the active Nodes
+	   + Variable nodes_tested added to main-cycle to limit the active Nodes
 	   + Service messages added to the User's screen
+	   + Node Polling delay increased to 12 ms
+	   + Add the Date to Terminal Header
+	   + Improve user's messages
+           + Cancel in User's window - move to PIN window (not to PCPH Greeting)
+           + Cancel in PIN window - first clear text, then go to Welcome screen
+           + Detect Linux while sending Linux commands
+           + Correct os.name from 'linux' to 'posix'
+	   + Remove '_ctypes' and add 'is' to 'is_extended_id' for socketcan v4.0
+           + Change minimum "set_current" value from 0x02 to 0x08
+	   + Add selection between Debug and Field mode
+	   + Debug mode with v2can - modified cycle chain
 v1_3 - Version for Internal Outdoor trial (no Keyboard required)
 	   + Nodes soft reset Shift-F7 with cycling selection the next three modes:
 		- Current "Charging Enabled" or "Charging Disabled" mode
@@ -45,9 +59,17 @@ v1_4 - Version for Trial with Keyboard (Keypad not supported)
 	   + to change Initial Settings to work with Keyboard
 	   + add a field sub_state_saved to Class NodeCan to be used for Nodes Resetting
 	   + changed screen size to 1024 x 600
-	   + changed Messages on User's screen
+	   + changed Service Messages on User's screen
+	   + changed Hoy-Keys Assignment
+	   + testing sequence according to the ver2 of PCPH CAN protocol
+	   + add getting version and serial number commands to sequence
+	   + add max current set command and try it in various combinations
 v1_5 - Version for Trial wih Keypad
 	   + initial windowed screen size back to 800 x 600
 	   + KeyPad hex code to add to the CAN-Bus log
 	   + KeyPad Keys Names decoded and Title with current time added to the log
 	   + Terminal and Terminal Header is inactive on starting
+	   + to allow Key output to the Terminal in "terminal_output = True" mode only
+	   + KeyPad enables event_generate Tk Events
+	   + Init sequence chain modified slightly to comply PCPH_CAN_v2 protocol
+	   + Self-testing CAN-Bus command added to the hard reset sequence
