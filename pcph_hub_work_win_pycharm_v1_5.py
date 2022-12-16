@@ -41,7 +41,7 @@ START_PASS = "000000"
 POLL_TIME = 12
 RESPONSE_MAX_TIME = 0.02                        # 5
 
-SCREEN_SAVER_TIME = 3_000_000                   # 12_0000             # 15_000
+SCREEN_SAVER_TIME = 3_000_000                   # 12_0000            # 15_000
 screen_save_event_counter = 0
 WAIT_CONNECTION_TIME = 300_000                  # 15_000
 wait_connection_counter = 0
