@@ -63,7 +63,7 @@ terminal_header = True                          # Alt-F6
 poll_active = True                              # Alt-Shift-C
 # can1_configured = True
 
-node_reset_when_can_reconnected = True          # Control-F5
+node_reset_when_can_reconnected = False          # Control-F5
 node_reset_when_node_get_disabled = True        # Control-F6
 node_reset_when_user_unplug_cable = False       # Control-F12
 
@@ -569,6 +569,7 @@ class NodeCan:
     def __init__(self, node_static):
         self.__node = node_static
         self.__node_to_reset = False
+        self.__flag_hard_reset = True
         self.__reset_cycles_count = 0
         self.__node_connected = True
         self.__state = 0
@@ -594,13 +595,17 @@ class NodeCan:
     def get_flag_node_to_reset(self):
         return self.__node_to_reset
 
-    def set_flag_node_to_reset(self):
+    def set_flag_node_to_reset(self, kind='hard'):
         self.__reset_cycles_count = 0
         self.__node_to_reset = True
+        self.__flag_hard_reset = kind == 'hard'
 
     def clear_flag_node_to_reset(self):
         self.__reset_cycles_count = 0
         self.__node_to_reset = False
+
+    def get_flag_hard_reset(self):
+        return self.__flag_hard_reset
 
     def get_reset_cycles_count(self):
         return self.__reset_cycles_count
@@ -874,14 +879,21 @@ class NodesCan:
                               is_extended_id=False)
         self.poll_node(message)
 
-    def hard_reset_current_node(self):
+    def reset_current_node(self):
         counter = self.__current_node_active.get_reset_cycles_count()
+        hard_reset = self.__current_node_active.get_flag_hard_reset()
+        node_charging_mode_was_enabled = self.__current_node_active.get_sub_state_saved() == 0x01
+        node_charging_mode_remain_disabled = hard_reset or not node_charging_mode_was_enabled
         if counter == 1:
             self.poll_node(self.msg_disable_node())
         if counter == 2:
             self.poll_node(self.msg_self_test())
         if counter == 5:
             self.poll_node(self.msg_set_standby())
+            if node_charging_mode_remain_disabled:
+                self.__current_node_active.clear_flag_node_to_reset()
+        if counter == 6:
+            self.poll_node(self.msg_enable_charging())
             self.__current_node_active.clear_flag_node_to_reset()
         self.__current_node_active.increment_reset_cycles_count()
 
@@ -1208,9 +1220,15 @@ class NodesCan:
                 old_state = self.__current_node_active.get_state_response()
                 self.__current_node_active.set_state_response(state)
                 self.__current_node_active.set_sub_state_response(sub_state)
-                if not self.__restart_state:
-                    # self.__current_node_active.set_state(state)
-                    self.__current_node_active.set_sub_state_saved(sub_state)
+                current_node_resetting = self.__current_node_active.get_flag_node_to_reset()
+                # if not self.__restart_state
+                #     self.__current_node_active.set_state(state)
+                if not self.__restart_state and not current_node_resetting:
+                    if state == 0x02 or state == 0x03 or state == 0x04 or state == 0x05:
+                        self.__current_node_active.set_sub_state_saved(sub_state)
+                    if node_reset_when_node_get_disabled:
+                        if state == 0x06 or state == 0x07:
+                            self.__current_node_active.set_flag_node_to_reset('soft')
                 car_get_disconnected = \
                     (old_state == 0x03 or old_state == 0x04 or old_state == 0x05) and state == 0x02
                 if car_get_disconnected:
@@ -1221,13 +1239,12 @@ class NodesCan:
                 if node_reset_when_user_unplug_cable:
                     if (old_state == 0x04 or old_state == 0x05) and state == 0x02:
                         self.hard_reset_node_number(self.__node_count)
-                if node_reset_when_can_reconnected:
+                if node_reset_when_can_reconnected or node_reset_when_node_get_disabled:
                     # if self.__current_node_active.get_flag_node_to_reset():
                     #     self.hard_reset_node_number(self.__node_count)
                     #     self.__current_node_active.clear_flag_node_to_reset()
-                    node_need_reset = self.__current_node_active.get_flag_node_to_reset()
-                    if node_need_reset and self.__flag_reset_per_cycle_active:
-                        self.hard_reset_current_node()
+                    if current_node_resetting and self.__flag_reset_per_cycle_active:
+                        self.reset_current_node()
                         self.__flag_reset_per_cycle_active = False
                 self.__current_node_active.set_current_measured_high(cur_measured_high)
                 self.__current_node_active.set_current_measured_low(cur_measured_low)

@@ -72,4 +72,5 @@ v1_5 - Version for Trial wih Keypad
 	   + to allow Key output to the Terminal in "terminal_output = True" mode only
 	   + KeyPad enables event_generate Tk Events
 	   + Init sequence chain modified slightly to comply PCPH_CAN_v2 protocol
-	   + Self-testing CAN-Bus command added to the hard reset sequence
+	   + Self-testing CAN-Bus command added to the Hard Reset sequence
+	   + Unexpected Node Disable event added - to srtart Soft Reset sequence
